@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { CouplePair, Message, Story, Countdown, PartnerMood, DrawingStroke } from "./src/types";
 
@@ -10,22 +9,40 @@ import { getFirestore, doc, getDoc, setDoc, collection, query, where, getDocs, l
 import fs from "fs";
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '10mb' }));
+
+// Vercel serverless rewrite compatibility: normalize incoming routes
+app.use((req, _res, next) => {
+  if (req.url && !req.url.startsWith('/api') && (req.url.startsWith('/couple') || req.url.startsWith('/gemini'))) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
 
 // Read Firebase configuration
 let db: any = null;
 try {
+  let firebaseConfig: any = null;
   const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-  if (fs.existsSync(configPath)) {
-    const firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  if (process.env.FIREBASE_CONFIG) {
+    try {
+      firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+    } catch {
+      console.error("Invalid JSON provided in FIREBASE_CONFIG environment variable.");
+    }
+  } else if (fs.existsSync(configPath)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  }
+
+  if (firebaseConfig) {
     const firebaseApp = initializeApp(firebaseConfig);
-    const dbId = firebaseConfig.firestoreDatabaseId || "ai-studio-69df5db0-b7eb-44b2-809f-5b1c2edc5428";
+    const dbId = firebaseConfig.firestoreDatabaseId || process.env.FIRESTORE_DATABASE_ID || "ai-studio-69df5db0-b7eb-44b2-809f-5b1c2edc5428";
     db = getFirestore(firebaseApp, dbId);
     console.log("Firestore successfully initialized on the server-side with dbId:", dbId);
   } else {
-    console.error("firebase-applet-config.json not found in " + configPath);
+    console.warn("firebase-applet-config.json not found and FIREBASE_CONFIG env var not set.");
   }
 } catch (err) {
   console.error("Failed to initialize Firestore on the server-side:", err);
@@ -865,7 +882,8 @@ app.post("/api/gemini/romantic-start", async (req, res) => {
 // Serve static Vite assets and integrate Vite middleware
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    // Hook Vite development server
+    // Hook Vite development server dynamically
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa"
@@ -885,4 +903,9 @@ async function startServer() {
   });
 }
 
-startServer();
+// Only listen if not running inside a Vercel serverless environment
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
