@@ -1,0 +1,11 @@
+{
+  "name": "SoulSync",
+  "description": "A beautiful, premium digital sanctuary for couples to express love, chat, play games, and share synchronized moments in real-time.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

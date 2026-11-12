@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "CouplePair": {
+      "title": "CouplePair",
+      "description": "State object for paired users in SoulSync including messaging, games, moods, and companion status.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique room ID" },
+        "codeA": { "type": "string", "description": "Partner A invitation link key code" },
+        "codeB": { "type": "string", "description": "Partner B invitation link key code" },
+        "userA": { "type": "object", "description": "User A info" },
+        "userB": { "type": "object", "description": "User B info" },
+        "isPaired": { "type": "boolean" },
+        "messages": { "type": "array" },
+        "stories": { "type": "array" },
+        "countdowns": { "type": "array" },
+        "moods": { "type": "array" },
+        "trivia": { "type": "object" },
+        "ticTacToe": { "type": "object" },
+        "coBrowsing": { "type": "object" },
+        "syncPlay": { "type": "object" },
+        "pet": { "type": "object" },
+        "drawing": { "type": "array" }
+      },
+      "required": ["id", "codeA", "codeB", "isPaired", "messages"]
+    }
+  },
+  "firestore": {
+    "/couples/{coupleId}": {
+      "schema": "CouplePair",
+      "description": "Chamber room documents for synchronizing love states, games, and notes across partners."
+    }
+  }
+}

@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Reusable global helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Couples collection rule
+    match /couples/{coupleId} {
+      // Single-document reads must validate the ID
+      allow get: if isValidId(coupleId);
+      
+      // Collection queries / list queries (where the document ID does not exist yet)
+      allow list: if true;
+      
+      // Single-document writes must validate the ID
+      allow create, update, delete: if isValidId(coupleId);
+    }
+  }
+}
