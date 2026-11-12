@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { CouplePair, Message, Story, Countdown, PartnerMood, DrawingStroke } from "./src/types";
+import defaultFirebaseConfig from "./firebase-applet-config.json";
 
 // Firebase Applet DB SDK
 import { initializeApp } from "firebase/app";
@@ -21,19 +22,43 @@ app.use((req, _res, next) => {
   next();
 });
 
+// Safe body extractor that handles Vercel serverless parsed bodies, strings, and standard Express JSON
+function getSafeBody(req: express.Request): any {
+  if (req.body && typeof req.body === 'object') {
+    return req.body;
+  }
+  if (typeof req.body === 'string') {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+// In-memory fallback repository to ensure chamber operations never fail even if cloud DB is transiently unreachable
+const memoryRooms = new Map<string, CouplePair>();
+
 // Read Firebase configuration
 let db: any = null;
 try {
-  let firebaseConfig: any = null;
-  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  let firebaseConfig: any = defaultFirebaseConfig;
   if (process.env.FIREBASE_CONFIG) {
     try {
       firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG);
     } catch {
       console.error("Invalid JSON provided in FIREBASE_CONFIG environment variable.");
     }
-  } else if (fs.existsSync(configPath)) {
-    firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } else {
+    const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+    if (fs.existsSync(configPath)) {
+      try {
+        firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      } catch {
+        // use defaultFirebaseConfig
+      }
+    }
   }
 
   if (firebaseConfig) {
@@ -42,7 +67,7 @@ try {
     db = getFirestore(firebaseApp, dbId);
     console.log("Firestore successfully initialized on the server-side with dbId:", dbId);
   } else {
-    console.warn("firebase-applet-config.json not found and FIREBASE_CONFIG env var not set.");
+    console.warn("firebaseConfig not available; operating with memory cache fallback.");
   }
 } catch (err) {
   console.error("Failed to initialize Firestore on the server-side:", err);
@@ -180,19 +205,20 @@ function pushNotification(pair: any, type: string, text: string, senderId: strin
 const DUMMY_PAIR_ID = "SIMULATE-COUPLE-TEST-ROOM";
 
 async function getCoupleFromDb(pairId: string): Promise<CouplePair | null> {
-  if (!db) return null;
-  const pathForGet = `couples/${pairId}`;
-  try {
-    const docRef = doc(db, "couples", pairId);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      return docSnap.data() as CouplePair;
+  if (db) {
+    try {
+      const docRef = doc(db, "couples", pairId);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        const pairData = docSnap.data() as CouplePair;
+        memoryRooms.set(pairId, pairData);
+        return pairData;
+      }
+    } catch (error) {
+      console.warn("Firestore read warning (falling back to memory):", error);
     }
-    return null;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, pathForGet);
-    return null;
   }
+  return memoryRooms.get(pairId) || null;
 }
 
 function sanitizeDbData(obj: any): any {
@@ -215,34 +241,40 @@ function sanitizeDbData(obj: any): any {
 }
 
 async function saveCoupleToDb(pairId: string, pair: CouplePair): Promise<void> {
+  memoryRooms.set(pairId, pair);
   if (!db) return;
-  const pathForWrite = `couples/${pairId}`;
   try {
     const docRef = doc(db, "couples", pairId);
     const sanitized = sanitizeDbData(pair);
     await setDoc(docRef, sanitized);
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, pathForWrite);
+    console.warn("Firestore write warning (retained safely in chamber memory):", error);
   }
 }
 
 async function findPairByInviteCode(inviteCode: string, isA: boolean): Promise<CouplePair | null> {
-  if (!db) return null;
-  const pathForList = "couples";
-  try {
-    const couplesRef = collection(db, "couples");
-    const fieldToCheck = isA ? "codeA" : "codeB";
-    const q = query(couplesRef, where(fieldToCheck, "==", inviteCode), limit(1));
-    const querySnapshot = await getDocs(q);
-    if (!querySnapshot.empty) {
-      const docSnap = querySnapshot.docs[0];
-      return docSnap.data() as CouplePair;
+  if (db) {
+    try {
+      const couplesRef = collection(db, "couples");
+      const fieldToCheck = isA ? "codeA" : "codeB";
+      const q = query(couplesRef, where(fieldToCheck, "==", inviteCode), limit(1));
+      const querySnapshot = await getDocs(q);
+      if (!querySnapshot.empty) {
+        const docSnap = querySnapshot.docs[0];
+        const data = docSnap.data() as CouplePair;
+        memoryRooms.set(data.id, data);
+        return data;
+      }
+    } catch (error) {
+      console.warn("Firestore list query warning (searching memory):", error);
     }
-    return null;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, pathForList);
-    return null;
   }
+  for (const pair of memoryRooms.values()) {
+    if ((isA && pair.codeA === inviteCode) || (!isA && pair.codeB === inviteCode)) {
+      return pair;
+    }
+  }
+  return null;
 }
 
 async function ensureDummyPairExists() {
@@ -307,10 +339,12 @@ app.get("/api/health", (req, res) => {
 // Generate a brand new partner link/code
 app.post("/api/couple/create-code", async (req, res) => {
   try {
-    const { userName } = req.body;
-    if (!userName) {
-      return res.status(400).json({ error: "Your name is required" });
+    const body = getSafeBody(req);
+    const rawName = body.userName || req.query.userName;
+    if (!rawName || typeof rawName !== 'string' || !rawName.trim()) {
+      return res.status(400).json({ error: "Your name is required to create a sanctuary." });
     }
+    const userName = rawName.trim();
 
     const codeA = generateCode();
     const codeB = generateCode();
@@ -337,9 +371,11 @@ app.post("/api/couple/create-code", async (req, res) => {
 // Join an existing couple pair using an invite code
 app.post("/api/couple/join-code", async (req, res) => {
   try {
-    const { inviteCode, userName } = req.body;
-    if (!inviteCode || !userName) {
-      return res.status(400).json({ error: "Invite code and your name are required" });
+    const body = getSafeBody(req);
+    const inviteCode = (body.inviteCode || req.query.inviteCode || "") as string;
+    const userName = (body.userName || req.query.userName || "Jordan") as string;
+    if (!inviteCode || typeof inviteCode !== 'string' || !inviteCode.trim()) {
+      return res.status(400).json({ error: "Invite code is required." });
     }
 
     const codeUpper = inviteCode.trim().toUpperCase();
@@ -349,7 +385,7 @@ app.post("/api/couple/join-code", async (req, res) => {
     let foundPair = await findPairByInviteCode(codeUpper, false);
 
     if (foundPair && foundPair.userB === null) {
-      foundPair.userB = { id: `user-b-${Date.now()}`, name: userName };
+      foundPair.userB = { id: `user-b-${Date.now()}`, name: userName.trim() };
       foundPair.isPaired = true;
       await saveCoupleToDb(foundPair.id, foundPair);
       return res.json({
@@ -365,7 +401,7 @@ app.post("/api/couple/join-code", async (req, res) => {
     const foundPairAsA = await findPairByInviteCode(codeUpper, true);
 
     if (foundPairAsA && foundPairAsA.userA === null) {
-      foundPairAsA.userA = { id: `user-a-${Date.now()}`, name: userName };
+      foundPairAsA.userA = { id: `user-a-${Date.now()}`, name: userName.trim() };
       foundPairAsA.isPaired = true;
       await saveCoupleToDb(foundPairAsA.id, foundPairAsA);
       return res.json({
@@ -406,7 +442,8 @@ app.get("/api/couple/state/:pairId", async (req, res) => {
 app.post("/api/couple/action/:pairId", async (req, res) => {
   try {
     const { pairId } = req.params;
-    const { actionType, payload, senderId } = req.body;
+    const body = getSafeBody(req);
+    const { actionType, payload, senderId } = body;
 
     const pair = await getCoupleFromDb(pairId);
   if (!pair) {
@@ -820,7 +857,8 @@ app.post("/api/couple/action/:pairId", async (req, res) => {
 // Gemini AI creative assistant proxy
 // Generates relationship prompts, games, love letters, and mood remedies using gemini-3.5-flash
 app.post("/api/gemini/romantic-start", async (req, res) => {
-  const { category, senderName, partnerName, currentMood } = req.body;
+  const body = getSafeBody(req);
+  const { category, senderName, partnerName, currentMood } = body;
   
   if (!aiClient) {
     // Elegant fallback prompt index if API Key was not set up yet

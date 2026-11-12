@@ -373,6 +373,15 @@ export default function App() {
         } else {
           setErrorNotice("Invalid server configuration or response. Please retry.");
         }
+      } else {
+        const contentType = resp.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const errData = await resp.json();
+          setErrorNotice(errData.error || `Server error (${resp.status}): Failed to create sanctuary.`);
+        } else {
+          const errText = await resp.text();
+          setErrorNotice(`Server error (${resp.status}): ${errText.slice(0, 100) || "Failed to create sanctuary room."}`);
+        }
       }
     } catch {
       setErrorNotice("Server network error. Please try again.");
